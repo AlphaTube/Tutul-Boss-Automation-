@@ -1,0 +1,8 @@
+{
+  "name": "Tutul Boss Automation",
+  "description": "Video Analysis and TTS Studio",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

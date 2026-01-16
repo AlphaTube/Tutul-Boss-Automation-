@@ -1,0 +1,17 @@
+
+{
+  "short_name": "TutulBoss",
+  "name": "Tutul Boss AI Automation Studio",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/7159/7159511.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#4f46e5",
+  "background_color": "#ffffff"
+}
