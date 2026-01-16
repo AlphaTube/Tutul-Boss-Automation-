@@ -3,6 +3,8 @@ import { geminiService, playPcmAudio, createWavBlob } from './geminiService';
 import { VoiceName, TargetLanguage, ScriptStyle, AppMode, TranscriptLine, TitleSuggestion } from './types';
 
 const App: React.FC = () => {
+  const [isLaunching, setIsLaunching] = useState(true);
+  const [showKeySelector, setShowKeySelector] = useState(false);
   const [mode, setMode] = useState<AppMode>(AppMode.VIDEO);
   const [scriptPrompt, setScriptPrompt] = useState("");
   const [videoFile, setVideoFile] = useState<File | null>(null);
@@ -11,9 +13,10 @@ const App: React.FC = () => {
   const [titles, setTitles] = useState<TitleSuggestion[]>([]);
   const [generatedAudioB64, setGeneratedAudioB64] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [apiReady, setApiReady] = useState<boolean>(false);
-  const [showSuccessToast, setShowSuccessToast] = useState(false);
   
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [isInstalled, setIsInstalled] = useState(false);
+
   // Settings
   const [voice1, setVoice1] = useState<VoiceName>(VoiceName.ZEPHYR);
   const [voice2, setVoice2] = useState<VoiceName>(VoiceName.KORE);
@@ -22,41 +25,66 @@ const App: React.FC = () => {
   const [isDualVoice, setIsDualVoice] = useState(false);
 
   useEffect(() => {
-    const isConfigured = geminiService.isApiKeyConfigured();
-    setApiReady(isConfigured);
-    if (isConfigured) {
-      setShowSuccessToast(true);
-      setTimeout(() => setShowSuccessToast(false), 5000);
+    checkApiKey();
+    
+    // Simulate Native Splash Screen
+    setTimeout(() => {
+      setIsLaunching(false);
+    }, 2000);
+
+    if (window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone) {
+      setIsInstalled(true);
     }
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    });
   }, []);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setVideoFile(file);
-      setError(null);
-      setTranscript([]);
-      setGeneratedAudioB64(null);
+  const checkApiKey = async () => {
+    const hasKey = geminiService.isApiKeyConfigured();
+    const hasSelected = (window as any).aistudio?.hasSelectedApiKey ? await (window as any).aistudio.hasSelectedApiKey() : false;
+    
+    if (!hasKey && !hasSelected) {
+      setShowKeySelector(true);
+    } else {
+      setShowKeySelector(false);
+    }
+  };
+
+  const handleOpenKeySelector = async () => {
+    triggerHaptic();
+    if ((window as any).aistudio?.openSelectKey) {
+      await (window as any).aistudio.openSelectKey();
+      setShowKeySelector(false);
+      window.location.reload(); // Refresh to apply the new key
+    } else {
+      setError("এই ডিভাইসে চাবি সিলেক্ট করার অপশন পাওয়া যাচ্ছে না।");
+    }
+  };
+
+  const triggerHaptic = () => {
+    if ('vibrate' in navigator) {
+      navigator.vibrate(20);
     }
   };
 
   const processContent = async () => {
-    if (!apiReady) {
-      setError("API_KEY খুঁজে পাওয়া যাচ্ছে না! দয়া করে ভার্সেল সেটিংস থেকে কী যোগ করুন।");
-      return;
-    }
+    triggerHaptic();
+    setError(null);
+    setGeneratedAudioB64(null);
+
     if (mode === AppMode.VIDEO && !videoFile) {
-      setError("প্রথমে একটি ভিডিও সিলেক্ট করুন!");
+      setError("ভিডিও ফাইল সিলেক্ট করুন।");
       return;
     }
     if (mode === AppMode.AI_GEN && !scriptPrompt.trim()) {
-      setError("আপনার টপিকটি লিখুন!");
+      setError("টপিক লিখুন।");
       return;
     }
 
     setIsProcessing(true);
-    setError(null);
-    setGeneratedAudioB64(null);
     
     try {
       let result;
@@ -72,10 +100,10 @@ const App: React.FC = () => {
         result = await geminiService.generateScriptFromText(scriptPrompt, targetLang, scriptStyle, isDualVoice);
       }
       
-      setTranscript(result.script);
-      setTitles(result.titles);
+      setTranscript(result.script || []);
+      setTitles(result.titles || []);
 
-      if (result.script.length > 0) {
+      if (result.script?.length > 0) {
         const audio = await geminiService.generateSpeech(
           result.script.map((l: any) => ({ text: l.rewritten, speaker: l.speaker })), 
           voice1, 
@@ -83,206 +111,209 @@ const App: React.FC = () => {
           isDualVoice
         );
         if (audio) setGeneratedAudioB64(audio);
-      } else {
-        throw new Error("স্ক্রিপ্ট তৈরি করা যায়নি। ভিডিওটি কি খুব বড়?");
       }
     } catch (err: any) {
+      const msg = err.message || "";
+      if (msg === "INVALID_KEY" || msg.includes("API key not valid") || msg.includes("entity was not found")) {
+        setError("আপনার API Key টি কাজ করছে না। অনুগ্রহ করে সঠিক কি (Key) সিলেক্ট করুন।");
+        setShowKeySelector(true);
+      } else {
+        setError("দুঃখিত, কোনো একটি সমস্যা হয়েছে। আবার চেষ্টা করুন।");
+      }
       console.error(err);
-      setError(err.message || "কানেকশন এরর। আবার চেষ্টা করুন।");
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const downloadAudio = () => {
-    if (!generatedAudioB64) return;
-    const blob = createWavBlob(generatedAudioB64);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `tutul-boss-${Date.now()}.wav`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  const handleInstall = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === 'accepted') setDeferredPrompt(null);
+    }
   };
 
-  return (
-    <div className="min-h-screen bg-slate-50 pb-32">
-      {showSuccessToast && (
-        <div className="fixed top-20 left-4 right-4 z-50 animate-in slide-in-from-top-10 fade-in duration-500">
-          <div className="bg-emerald-600 text-white p-4 rounded-2xl shadow-2xl flex items-center gap-3 border border-emerald-400">
-            <div className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center">
-              <i className="fa-solid fa-check text-sm"></i>
-            </div>
-            <div>
-              <p className="text-xs font-black">API Connected!</p>
-              <p className="text-[10px] font-bold">সিস্টেম এখন অনলাইনে আছে।</p>
-            </div>
+  if (isLaunching) {
+    return (
+      <div className="fixed inset-0 bg-white flex flex-col items-center justify-center z-[100]">
+        <div className="w-24 h-24 bg-indigo-600 rounded-[2.5rem] flex items-center justify-center text-white shadow-2xl shadow-indigo-200 splash-icon">
+          <i className="fa-solid fa-bolt-lightning text-4xl"></i>
+        </div>
+        <div className="absolute bottom-16 flex flex-col items-center gap-2">
+          <p className="font-black text-slate-900 tracking-tighter text-xl uppercase">Tutul Boss Studio</p>
+          <div className="flex gap-1">
+            <div className="w-1.5 h-1.5 bg-indigo-600 rounded-full animate-bounce"></div>
+            <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.2s]"></div>
+            <div className="w-1.5 h-1.5 bg-indigo-200 rounded-full animate-bounce [animation-delay:0.4s]"></div>
           </div>
         </div>
-      )}
+      </div>
+    );
+  }
 
-      <header className="bg-white p-4 shadow-sm flex items-center justify-between sticky top-0 z-20">
+  if (showKeySelector) {
+    return (
+      <div className="fixed inset-0 bg-slate-50 flex flex-col items-center justify-center z-[110] px-10 text-center">
+        <div className="w-20 h-20 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-600 mb-6">
+          <i className="fa-solid fa-key text-3xl"></i>
+        </div>
+        <h2 className="text-xl font-black text-slate-900 mb-2">Setup Required</h2>
+        <p className="text-slate-500 text-sm mb-8 leading-relaxed">
+          অ্যাপটি ব্যবহার করার জন্য আপনাকে একটি বৈধ <b>API Key</b> সিলেক্ট করতে হবে। এটি সম্পূর্ণ নিরাপদ।
+        </p>
+        <button 
+          onClick={handleOpenKeySelector}
+          className="w-full py-5 bg-indigo-600 text-white rounded-[2rem] font-black shadow-xl shadow-indigo-100 btn-active mb-4"
+        >
+          SELECT API KEY
+        </button>
+        <a 
+          href="https://ai.google.dev/gemini-api/docs/billing" 
+          target="_blank" 
+          rel="noopener noreferrer"
+          className="text-indigo-600 text-[10px] font-black uppercase tracking-widest underline decoration-2 underline-offset-4"
+        >
+          Learn About Billing
+        </a>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-full bg-white animate-app-in">
+      {/* Header */}
+      <header className="px-6 pt-14 pb-4 bg-white/90 backdrop-blur-md sticky top-0 z-40 flex items-center justify-between border-b border-slate-50">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg">
-            <i className="fa-solid fa-bolt-lightning"></i>
+          <div className="w-10 h-10 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg">
+            <i className="fa-solid fa-bolt-lightning text-sm"></i>
           </div>
-          <div>
-            <h1 className="font-black text-slate-800 text-lg leading-tight flex items-center gap-2">
-              TUTUL BOSS
-              <span className={`w-2 h-2 rounded-full animate-pulse ${apiReady ? 'bg-emerald-500' : 'bg-rose-500'}`}></span>
-            </h1>
-            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
-              {apiReady ? 'System Online' : 'System Offline'}
-            </p>
+          <div className="flex flex-col">
+            <h1 className="font-black text-slate-900 tracking-tighter text-base leading-none">TUTUL BOSS</h1>
+            <span className="text-[8px] font-black text-emerald-500 uppercase tracking-widest mt-1 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></span> SYSTEM ONLINE
+            </span>
           </div>
         </div>
-        <button onClick={() => window.location.reload()} className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 active:rotate-180 transition-all">
-          <i className="fa-solid fa-rotate-right"></i>
+        <button onClick={() => { triggerHaptic(); window.location.reload(); }} className="w-10 h-10 rounded-full bg-slate-50 flex items-center justify-center text-slate-400">
+          <i className="fa-solid fa-rotate-right text-xs"></i>
         </button>
       </header>
 
-      <main className="p-4 space-y-6 max-w-lg mx-auto">
-        {!apiReady && (
-          <div className="bg-rose-50 border border-rose-100 p-5 rounded-[2rem] space-y-2">
-            <p className="text-[10px] font-black text-rose-600 uppercase flex items-center gap-2">
-              <i className="fa-solid fa-circle-exclamation"></i> API Key Missing
-            </p>
-            <p className="text-xs font-medium text-rose-500 leading-relaxed">
-              আপনার ভার্সেল প্রজেক্ট সেটিংস-এ গিয়ে <b>API_KEY</b> এনভায়রনমেন্ট ভেরিয়েবল যোগ করুন এবং <b>Redeploy</b> দিন।
-            </p>
+      {/* Main Content */}
+      <main className="flex-1 overflow-y-auto px-5 pt-6 pb-40 space-y-6">
+        
+        {/* Error Message UI */}
+        {error && (
+          <div className="p-5 bg-rose-50 border border-rose-100 rounded-[2rem] flex items-start gap-4 animate-shake">
+            <div className="w-10 h-10 bg-rose-500 rounded-full flex items-center justify-center text-white shrink-0 shadow-lg shadow-rose-100">
+              <i className="fa-solid fa-triangle-exclamation text-xs"></i>
+            </div>
+            <div>
+              <p className="text-xs font-black text-rose-600 uppercase mb-1">Error Detected</p>
+              <p className="text-xs font-bold text-rose-500 leading-relaxed">{error}</p>
+            </div>
           </div>
         )}
 
-        <div className="flex bg-white p-1 rounded-2xl shadow-sm">
-          <button onClick={() => setMode(AppMode.VIDEO)} className={`flex-1 py-3 rounded-xl text-xs font-black transition-all ${mode === AppMode.VIDEO ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400'}`}>
-            <i className="fa-solid fa-video mr-2"></i>VIDEO MODE
-          </button>
-          <button onClick={() => setMode(AppMode.AI_GEN)} className={`flex-1 py-3 rounded-xl text-xs font-black transition-all ${mode === AppMode.AI_GEN ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400'}`}>
-            <i className="fa-solid fa-wand-magic-sparkles mr-2"></i>AI GENERATOR
-          </button>
+        <div className="bg-slate-100/50 p-1.5 rounded-[2rem] flex items-center gap-1">
+          <button onClick={() => { triggerHaptic(); setMode(AppMode.VIDEO); }} className={`flex-1 py-3.5 rounded-[1.75rem] text-[10px] font-black tracking-widest transition-all ${mode === AppMode.VIDEO ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400'}`}>VIDEO MODE</button>
+          <button onClick={() => { triggerHaptic(); setMode(AppMode.AI_GEN); }} className={`flex-1 py-3.5 rounded-[1.75rem] text-[10px] font-black tracking-widest transition-all ${mode === AppMode.AI_GEN ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400'}`}>AI STORY</button>
         </div>
 
-        <div className="bg-white p-6 rounded-[2.5rem] shadow-xl space-y-5 border border-white">
+        <div className="bg-white rounded-[2.5rem] p-7 shadow-[0_20px_50px_rgba(0,0,0,0.03)] border border-slate-50 space-y-7">
           {mode === AppMode.VIDEO ? (
-            <div className="group border-2 border-dashed border-slate-200 rounded-3xl p-8 text-center bg-slate-50 hover:bg-indigo-50/30 hover:border-indigo-200 transition-all relative overflow-hidden">
-              <input type="file" accept="video/*" className="absolute inset-0 opacity-0 cursor-pointer z-10" onChange={handleFileChange} />
-              <div className="relative z-0">
-                <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center mx-auto mb-3 text-indigo-500">
-                  <i className="fa-solid fa-cloud-arrow-up text-2xl"></i>
+            <div className="relative">
+              <input type="file" accept="video/*" className="absolute inset-0 opacity-0 z-10" onChange={(e) => { triggerHaptic(); setVideoFile(e.target.files?.[0] || null); }} />
+              <div className="border-2 border-dashed border-slate-200 rounded-[2rem] p-10 flex flex-col items-center justify-center bg-slate-50/50">
+                <div className="w-14 h-14 bg-white rounded-2xl shadow-sm flex items-center justify-center text-indigo-600 mb-3">
+                  <i className="fa-solid fa-clapperboard text-xl"></i>
                 </div>
-                <p className="text-sm font-black text-slate-700">{videoFile ? videoFile.name : 'ভিডিও সিলেক্ট করুন'}</p>
-                <p className="text-[10px] text-slate-400 mt-1 font-bold">MP4, MOV up to 20MB</p>
+                <p className="text-sm font-black text-slate-700">{videoFile ? videoFile.name : 'ভিডিও আপলোড করুন'}</p>
               </div>
             </div>
           ) : (
-            <div className="space-y-2">
-              <label className="text-[10px] font-black text-slate-400 uppercase ml-2">গল্পের টপিক</label>
-              <textarea value={scriptPrompt} onChange={(e) => setScriptPrompt(e.target.value)} placeholder="উদা: একটি বিড়াল ও একটি ইঁদুরের মজার গল্প..." className="w-full h-32 p-5 bg-slate-50 rounded-3xl text-sm font-medium border-2 border-transparent focus:border-indigo-500 focus:bg-white transition-all resize-none outline-none" />
-            </div>
+            <textarea 
+              value={scriptPrompt} onChange={(e) => setScriptPrompt(e.target.value)}
+              placeholder="গল্পের আইডিয়াটি এখানে লিখুন..."
+              className="w-full h-40 p-6 bg-slate-50 rounded-[2rem] text-sm font-bold border-none focus:ring-0 transition-all resize-none"
+            />
           )}
 
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <label className="text-[10px] font-black text-slate-400 uppercase ml-2">ভাষা</label>
-                <select value={targetLang} onChange={(e) => setTargetLang(e.target.value as TargetLanguage)} className="w-full bg-slate-50 p-4 rounded-2xl text-xs font-bold border-none appearance-none cursor-pointer">
-                  {Object.values(TargetLanguage).map(l => <option key={l} value={l}>{l}</option>)}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-black text-slate-400 uppercase ml-2">মুড</label>
-                <select value={scriptStyle} onChange={(e) => setScriptStyle(e.target.value as ScriptStyle)} className="w-full bg-slate-50 p-4 rounded-2xl text-xs font-bold border-none appearance-none cursor-pointer">
-                  {Object.values(ScriptStyle).map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-slate-50 p-4 rounded-2xl">
+              <label className="text-[8px] font-black text-slate-400 uppercase mb-1 block">Language</label>
+              <select value={targetLang} onChange={(e) => setTargetLang(e.target.value as TargetLanguage)} className="w-full bg-transparent text-xs font-bold border-none outline-none appearance-none">
+                {Object.values(TargetLanguage).map(l => <option key={l} value={l}>{l}</option>)}
+              </select>
             </div>
-
-            <div className="p-4 bg-slate-50 rounded-3xl space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <i className="fa-solid fa-microphone-lines text-indigo-500 text-xs"></i>
-                  <span className="text-[10px] font-black text-slate-500 uppercase">Dual Voice Mode</span>
-                </div>
-                <button onClick={() => setIsDualVoice(!isDualVoice)} className={`w-10 h-5 rounded-full transition-all relative ${isDualVoice ? 'bg-indigo-600' : 'bg-slate-300'}`}>
-                  <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${isDualVoice ? 'left-6' : 'left-1'}`}></div>
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 gap-2">
-                <div className="flex items-center gap-2">
-                   <span className="text-[10px] font-bold text-slate-400 min-w-[50px]">ভয়েস ১:</span>
-                   <select value={voice1} onChange={(e) => setVoice1(e.target.value as VoiceName)} className="flex-1 bg-white p-2 rounded-xl text-[10px] font-bold border-none">
-                     {Object.values(VoiceName).map(v => <option key={v} value={v}>{v}</option>)}
-                   </select>
-                </div>
-                {isDualVoice && (
-                  <div className="flex items-center gap-2 animate-in fade-in">
-                     <span className="text-[10px] font-bold text-slate-400 min-w-[50px]">ভয়েস ২:</span>
-                     <select value={voice2} onChange={(e) => setVoice2(e.target.value as VoiceName)} className="flex-1 bg-white p-2 rounded-xl text-[10px] font-bold border-none">
-                       {Object.values(VoiceName).map(v => <option key={v} value={v}>{v}</option>)}
-                     </select>
-                  </div>
-                )}
-              </div>
+            <div className="bg-slate-50 p-4 rounded-2xl">
+              <label className="text-[8px] font-black text-slate-400 uppercase mb-1 block">Mood</label>
+              <select value={scriptStyle} onChange={(e) => setScriptStyle(e.target.value as ScriptStyle)} className="w-full bg-transparent text-xs font-bold border-none outline-none appearance-none">
+                {Object.values(ScriptStyle).map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
             </div>
           </div>
 
-          <button onClick={processContent} disabled={isProcessing} className="w-full py-5 bg-indigo-600 text-white rounded-3xl font-black text-sm shadow-xl disabled:opacity-50 active:scale-95 transition-all">
-            {isProcessing ? 'ম্যাজিক চলছে...' : 'ভিডিও ডাবিং শুরু করুন'}
+          <button onClick={processContent} disabled={isProcessing} className="w-full py-5 bg-indigo-600 text-white rounded-[1.75rem] font-black text-sm shadow-xl shadow-indigo-100 disabled:opacity-50 btn-active flex items-center justify-center gap-3">
+            {isProcessing ? <><i className="fa-solid fa-circle-notch animate-spin"></i> PROCESSING...</> : <><i className="fa-solid fa-wand-magic-sparkles"></i> START GENERATING</>}
           </button>
-
-          {error && <p className="text-[10px] font-bold text-rose-500 bg-rose-50 p-3 rounded-xl border border-rose-100 text-center">{error}</p>}
         </div>
 
         {titles.length > 0 && (
-          <div className="bg-white p-6 rounded-[2.5rem] shadow-sm space-y-4 animate-in fade-in slide-in-from-bottom-4">
-            <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest"><i className="fa-solid fa-fire text-orange-500 mr-2"></i>Viral Titles</h3>
-            <div className="space-y-2">
-              {titles.map((t, i) => (
-                <div key={i} className="p-4 bg-slate-50 rounded-2xl text-xs font-bold text-slate-700 flex justify-between items-center group">
-                  <span>{t.local}</span>
-                  <button onClick={() => navigator.clipboard.writeText(t.local)} className="opacity-0 group-hover:opacity-100 text-indigo-500"><i className="fa-solid fa-copy"></i></button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {transcript.length > 0 && (
-          <div className="bg-white p-6 rounded-[2.5rem] shadow-sm space-y-4 animate-in fade-in">
-            <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest"><i className="fa-solid fa-file-lines text-indigo-500 mr-2"></i>Script Preview</h3>
-            <div className="space-y-4">
-              {transcript.map((line, i) => (
-                <div key={i} className="space-y-1">
-                  <span className={`text-[9px] font-black px-2 py-0.5 rounded-md uppercase ${line.speaker === 'Speaker 2' ? 'bg-purple-100 text-purple-600' : 'bg-indigo-100 text-indigo-600'}`}>{line.speaker || 'Voice'}</span>
-                  <p className="text-sm font-bold text-slate-800 pl-2 border-l-4 border-indigo-400 bg-indigo-50/20 p-2 rounded-r-xl">{line.rewritten}</p>
-                </div>
-              ))}
-            </div>
+          <div className="space-y-3">
+            <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">Viral Titles</h3>
+            {titles.map((t, i) => (
+              <div key={i} className="bg-white p-5 rounded-3xl flex items-center justify-between border border-slate-50 shadow-sm active:bg-slate-50 transition-all">
+                <p className="text-sm font-bold text-slate-800">{t.local}</p>
+                <button onClick={() => { triggerHaptic(); navigator.clipboard.writeText(t.local); alert('Copied!'); }} className="w-9 h-9 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center">
+                  <i className="fa-solid fa-copy text-xs"></i>
+                </button>
+              </div>
+            ))}
           </div>
         )}
       </main>
 
+      {/* Floating Audio Player */}
       {generatedAudioB64 && (
-        <div className="fixed bottom-6 left-4 right-4 z-30 animate-in slide-in-from-bottom-10">
-          <div className="bg-slate-900 text-white p-5 rounded-[2rem] flex items-center justify-between shadow-2xl border border-slate-800">
+        <div className="fixed bottom-28 inset-x-6 z-40">
+          <div className="bg-slate-900 rounded-[3rem] p-5 flex items-center justify-between shadow-2xl border border-white/10 backdrop-blur-xl">
             <div className="flex items-center gap-4">
-              <div className="w-12 h-12 bg-indigo-500 rounded-2xl flex items-center justify-center">
-                <i className="fa-solid fa-music text-lg"></i>
+              <div className="w-12 h-12 bg-indigo-600 rounded-full flex items-center justify-center text-white shadow-lg">
+                <i className="fa-solid fa-microphone-lines"></i>
               </div>
               <div>
-                <p className="text-xs font-black">AI ভয়েস রেডি!</p>
-                <p className="text-[10px] text-slate-400 font-bold uppercase">24kHz PCM Audio</p>
+                <p className="text-white text-xs font-black">AI Voice Ready</p>
+                <p className="text-slate-400 text-[10px] font-bold">Studio Quality Audio</p>
               </div>
             </div>
-            <div className="flex gap-3">
-              <button onClick={() => playPcmAudio(generatedAudioB64)} className="w-12 h-12 bg-white text-slate-900 rounded-2xl flex items-center justify-center hover:scale-105 transition-all"><i className="fa-solid fa-play ml-1"></i></button>
-              <button onClick={downloadAudio} className="w-12 h-12 bg-indigo-600 text-white rounded-2xl flex items-center justify-center hover:scale-105 transition-all"><i className="fa-solid fa-download"></i></button>
+            <div className="flex gap-2">
+              <button onClick={() => { triggerHaptic(); playPcmAudio(generatedAudioB64); }} className="w-12 h-12 bg-white text-slate-900 rounded-full flex items-center justify-center btn-active">
+                <i className="fa-solid fa-play"></i>
+              </button>
+              <button onClick={() => { triggerHaptic(); const blob = createWavBlob(generatedAudioB64); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download='voice.wav'; a.click(); }} className="w-12 h-12 bg-white/10 text-white rounded-full flex items-center justify-center btn-active">
+                <i className="fa-solid fa-download"></i>
+              </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* Navigation */}
+      <nav className="fixed bottom-0 inset-x-0 bg-white border-t border-slate-100 px-10 pt-4 pb-10 flex justify-around items-center z-50">
+        <button onClick={() => { triggerHaptic(); setMode(AppMode.VIDEO); }} className={`flex flex-col items-center gap-1 transition-all ${mode === AppMode.VIDEO ? 'text-indigo-600 scale-110' : 'text-slate-300'}`}>
+          <i className="fa-solid fa-clapperboard text-xl"></i>
+          <span className="text-[9px] font-black uppercase tracking-tighter">Studio</span>
+        </button>
+        <button onClick={() => { triggerHaptic(); setMode(AppMode.AI_GEN); }} className={`flex-1 mx-4 h-12 max-w-[48px] bg-slate-50 rounded-2xl flex items-center justify-center transition-all ${mode === AppMode.AI_GEN ? 'bg-indigo-600 text-white shadow-lg rotate-12' : 'text-slate-300'}`}>
+          <i className="fa-solid fa-wand-sparkles text-xl"></i>
+        </button>
+        <button onClick={() => { triggerHaptic(); setShowKeySelector(true); }} className="flex flex-col items-center gap-1 text-slate-300">
+          <i className="fa-solid fa-key text-xl"></i>
+          <span className="text-[9px] font-black uppercase tracking-tighter">Key</span>
+        </button>
+      </nav>
     </div>
   );
 };

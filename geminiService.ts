@@ -1,38 +1,19 @@
-
 import { GoogleGenAI, Modality, Type } from "@google/genai";
 import { VoiceName, TargetLanguage, ScriptStyle } from "./types";
 
-// Vercel extracts this from Environment Variables
-const API_KEY = process.env.API_KEY || '';
-
 export class GeminiService {
-  private ai: GoogleGenAI | null = null;
-
-  constructor() {
-    if (API_KEY) {
-      this.ai = new GoogleGenAI({ apiKey: API_KEY });
-    }
-  }
-
-  // Check if API key exists and is likely valid
-  isApiKeyConfigured(): boolean {
-    return API_KEY.length > 10;
-  }
-
-  getApiKeyPreview(): string {
-    if (!API_KEY) return "Missing";
-    return `${API_KEY.substring(0, 4)}...${API_KEY.substring(API_KEY.length - 4)}`;
-  }
-
+  // Always create a fresh instance to ensure the most up-to-date API key is used
   private getAI() {
-    if (!this.ai) {
-      if (API_KEY) {
-        this.ai = new GoogleGenAI({ apiKey: API_KEY });
-        return this.ai;
-      }
-      throw new Error("API Key is missing. Please check your Vercel Environment Variables.");
+    const apiKey = process.env.API_KEY;
+    if (!apiKey || apiKey === "undefined" || apiKey.length < 5) {
+      throw new Error("INVALID_KEY");
     }
-    return this.ai;
+    return new GoogleGenAI({ apiKey });
+  }
+
+  isApiKeyConfigured(): boolean {
+    const key = process.env.API_KEY;
+    return !!key && key !== "undefined" && key.length > 10;
   }
 
   async generateScriptFromText(
@@ -48,7 +29,7 @@ export class GeminiService {
 
     const response = await ai.models.generateContent({
       model: 'gemini-3-pro-preview',
-      contents: `Generate a script for: "${promptText}". Style: ${style}, Language: ${targetLanguage}. ${dualVoiceInstruction}. Return JSON with "script" (original, rewritten, speaker) and "titles" (local).`,
+      contents: `Generate a script for: "${promptText}". Style: ${style}, Language: ${targetLanguage}. ${dualVoiceInstruction}. Return JSON with "script" (array of {original, rewritten, speaker}) and "titles" (array of {local}).`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -82,6 +63,7 @@ export class GeminiService {
     try {
       return JSON.parse(response.text || '{"script":[], "titles":[]}');
     } catch (e) {
+      console.error("Failed to parse JSON response", e);
       return { script: [], titles: [] };
     }
   }
@@ -100,7 +82,7 @@ export class GeminiService {
         {
           parts: [
             { inlineData: { data: videoBase64, mimeType } },
-            { text: `Watch this video. Rewrite the transcript into ${targetLanguage} in a ${style} style. ${isDualVoice ? 'Split between two speakers' : 'Single speaker'}. Return JSON with "script" and "titles".` }
+            { text: `Analyze this video. Translate and rewrite the content into ${targetLanguage} with a ${style} style. ${isDualVoice ? 'Identify two different characters if possible and assign lines as Speaker 1 and Speaker 2' : 'Assign everything to Speaker 1'}. Return JSON.` }
           ]
         }
       ],
@@ -137,6 +119,7 @@ export class GeminiService {
     try {
       return JSON.parse(response.text || '{"script":[], "titles":[]}');
     } catch (e) {
+      console.error("Failed to parse video response", e);
       return { script: [], titles: [] };
     }
   }
@@ -148,22 +131,26 @@ export class GeminiService {
     isDualVoice: boolean = false
   ): Promise<string | undefined> {
     const ai = this.getAI();
-    const fullText = lines.map(l => `${l.speaker}: ${l.text}`).join('\n');
+    const fullPrompt = lines.map(l => `${l.speaker}: ${l.text}`).join('\n');
+    
+    const speechConfig: any = {};
+    if (isDualVoice && voice2) {
+      speechConfig.multiSpeakerVoiceConfig = {
+        speakerVoiceConfigs: [
+          { speaker: 'Speaker 1', voiceConfig: { prebuiltVoiceConfig: { voiceName: voice1 } } },
+          { speaker: 'Speaker 2', voiceConfig: { prebuiltVoiceConfig: { voiceName: voice2 } } },
+        ],
+      };
+    } else {
+      speechConfig.voiceConfig = { prebuiltVoiceConfig: { voiceName: voice1 } };
+    }
+
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text: `Generate audio for: ${fullText}` }] }],
+      contents: [{ parts: [{ text: `TTS this script precisely:\n${fullPrompt}` }] }],
       config: {
         responseModalities: [Modality.AUDIO],
-        speechConfig: isDualVoice && voice2 ? {
-          multiSpeakerVoiceConfig: {
-            speakerVoiceConfigs: [
-              { speaker: 'Speaker 1', voiceConfig: { prebuiltVoiceConfig: { voiceName: voice1 } } },
-              { speaker: 'Speaker 2', voiceConfig: { prebuiltVoiceConfig: { voiceName: voice2 } } },
-            ],
-          },
-        } : {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: voice1 } }
-        }
+        speechConfig
       },
     });
     return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
@@ -193,18 +180,18 @@ export function createWavBlob(base64Data: string): Blob {
   for (let i = 0; i < binaryString.length; i++) pcmData[i] = binaryString.charCodeAt(i);
   const header = new ArrayBuffer(44);
   const view = new DataView(header);
-  view.setUint32(0, 0x52494646, false);
+  view.setUint32(0, 0x52494646, false); // RIFF
   view.setUint32(4, 36 + pcmData.length, true);
-  view.setUint32(8, 0x57415645, false);
-  view.setUint32(12, 0x666d7420, false);
+  view.setUint32(8, 0x57415645, false); // WAVE
+  view.setUint32(12, 0x666d7420, false); // fmt 
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, 24000, true);
-  view.setUint32(28, 48000, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  view.setUint32(36, 0x64617461, false);
+  view.setUint16(22, 1, true); // Mono
+  view.setUint32(24, 24000, true); // Sample Rate
+  view.setUint32(28, 48000, true); // Byte Rate
+  view.setUint16(32, 2, true); // Block Align
+  view.setUint16(34, 16, true); // Bits per sample
+  view.setUint32(36, 0x64617461, false); // data
   view.setUint32(40, pcmData.length, true);
   return new Blob([header, pcmData], { type: 'audio/wav' });
 }
